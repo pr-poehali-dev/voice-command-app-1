@@ -1,35 +1,42 @@
 import { useState, useEffect, useRef } from "react";
 import Icon from "@/components/ui/icon";
 
-const COMMANDS = [
+type Command = {
+  phrase: string;
+  label: string;
+  description: string;
+  icon: string;
+  url: string;
+};
+
+const DEFAULT_COMMANDS: Command[] = [
   {
     phrase: "открой гараж",
     label: "Открой гараж",
     description: "Открывает устройство Vorota в Google Home",
     icon: "DoorOpen",
-    action: () => {
-      window.location.href =
-        "intent://home.google.com#Intent;scheme=https;package=com.google.android.apps.chromecast.app;end";
-    },
+    url: "intent://home.google.com#Intent;scheme=https;package=com.google.android.apps.chromecast.app;end",
   },
   {
     phrase: "запусти навигацию",
     label: "Запусти навигацию",
     description: "Открывает Яндекс Навигатор",
     icon: "Navigation",
-    action: () => {
-      window.location.href = "yandexnavi://";
-    },
+    url: "yandexnavi://",
   },
   {
     phrase: "включи радио",
     label: "Включи радио онлайн",
     description: "Открывает приложение FMPlay",
     icon: "Radio",
-    action: () => {
-      window.location.href = "fmplay://";
-    },
+    url: "fmplay://",
   },
+];
+
+const ICON_OPTIONS = [
+  "Zap", "Star", "Heart", "Home", "Phone", "Music", "Camera", "Map",
+  "Mail", "Bell", "Car", "Lightbulb", "Tv", "Wifi", "Lock", "Settings",
+  "Navigation", "Radio", "DoorOpen", "Mic", "Volume2", "ShoppingCart",
 ];
 
 type HistoryItem = {
@@ -45,6 +52,21 @@ const formatTime = () => {
   return `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
 };
 
+const STORAGE_KEY = "voice_commands";
+
+const loadCommands = (): Command[] => {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    return saved ? JSON.parse(saved) : DEFAULT_COMMANDS;
+  } catch {
+    return DEFAULT_COMMANDS;
+  }
+};
+
+const saveCommands = (cmds: Command[]) => {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(cmds));
+};
+
 declare global {
   interface Window {
     SpeechRecognition: typeof SpeechRecognition;
@@ -54,12 +76,19 @@ declare global {
 
 type Tab = "commands" | "history";
 
+const EMPTY_FORM = { label: "", phrase: "", description: "", icon: "Zap", url: "" };
+
 export default function Index() {
   const [activeTab, setActiveTab] = useState<Tab>("commands");
   const [listening, setListening] = useState(false);
   const [transcript, setTranscript] = useState("");
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [lastMatchedId, setLastMatchedId] = useState<number | null>(null);
+  const [commands, setCommands] = useState<Command[]>(loadCommands);
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState(EMPTY_FORM);
+  const [editIndex, setEditIndex] = useState<number | null>(null);
+  const [deleteConfirm, setDeleteConfirm] = useState<number | null>(null);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const idRef = useRef(1);
 
@@ -67,68 +96,87 @@ export default function Index() {
     const item: HistoryItem = { id: idRef.current++, phrase, result, time: formatTime(), status };
     setHistory((prev) => [item, ...prev]);
     if (status === "success") setLastMatchedId(item.id);
-    return item.id;
   };
 
   const handleTranscript = (text: string) => {
     const lower = text.toLowerCase().trim();
     setTranscript(lower);
-    const matched = COMMANDS.find((cmd) => lower.includes(cmd.phrase));
+    const matched = commands.find((cmd) => lower.includes(cmd.phrase));
     if (matched) {
       addHistory(matched.label, `Выполняется: ${matched.description}`, "success");
-      setTimeout(() => matched.action(), 600);
+      setTimeout(() => { window.location.href = matched.url; }, 600);
     } else {
       addHistory(text, "Команда не распознана", "error");
     }
   };
 
   const startListening = () => {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      addHistory("—", "Браузер не поддерживает распознавание голоса", "error");
-      return;
-    }
-    const recognition = new SpeechRecognition();
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { addHistory("—", "Браузер не поддерживает распознавание голоса", "error"); return; }
+    const recognition = new SR();
     recognition.lang = "ru-RU";
     recognition.interimResults = false;
     recognition.maxAlternatives = 1;
-    recognition.onresult = (event) => {
-      const text = event.results[0][0].transcript;
-      handleTranscript(text);
-    };
-    recognition.onerror = (event) => {
-      addHistory("—", `Ошибка микрофона: ${event.error}`, "error");
-      setListening(false);
-    };
-    recognition.onend = () => {
-      setListening(false);
-      setTranscript("");
-    };
+    recognition.onresult = (e) => handleTranscript(e.results[0][0].transcript);
+    recognition.onerror = (e) => { addHistory("—", `Ошибка: ${e.error}`, "error"); setListening(false); };
+    recognition.onend = () => { setListening(false); setTranscript(""); };
     recognitionRef.current = recognition;
     recognition.start();
     setListening(true);
     setTranscript("");
   };
 
-  const stopListening = () => {
-    recognitionRef.current?.stop();
-    setListening(false);
-    setTranscript("");
-  };
+  const stopListening = () => { recognitionRef.current?.stop(); setListening(false); setTranscript(""); };
+  const handleMicClick = () => listening ? stopListening() : startListening();
 
-  const handleMicClick = () => {
-    if (listening) stopListening();
-    else startListening();
-  };
-
-  const runCommand = (cmd: typeof COMMANDS[0]) => {
+  const runCommand = (cmd: Command) => {
     addHistory(cmd.label, `Выполняется: ${cmd.description}`, "success");
-    setTimeout(() => cmd.action(), 400);
+    setTimeout(() => { window.location.href = cmd.url; }, 400);
   };
 
-  useEffect(() => {
-    return () => recognitionRef.current?.stop();
-  }, []);
+  const openAddForm = () => {
+    setForm(EMPTY_FORM);
+    setEditIndex(null);
+    setShowForm(true);
+  };
+
+  const openEditForm = (idx: number) => {
+    const cmd = commands[idx];
+    setForm({ label: cmd.label, phrase: cmd.phrase, description: cmd.description, icon: cmd.icon, url: cmd.url });
+    setEditIndex(idx);
+    setShowForm(true);
+  };
+
+  const saveForm = () => {
+    if (!form.label.trim() || !form.phrase.trim() || !form.url.trim()) return;
+    const newCmd: Command = {
+      label: form.label.trim(),
+      phrase: form.phrase.trim().toLowerCase(),
+      description: form.description.trim() || form.label.trim(),
+      icon: form.icon,
+      url: form.url.trim(),
+    };
+    let updated: Command[];
+    if (editIndex !== null) {
+      updated = commands.map((c, i) => (i === editIndex ? newCmd : c));
+    } else {
+      updated = [...commands, newCmd];
+    }
+    setCommands(updated);
+    saveCommands(updated);
+    setShowForm(false);
+    setForm(EMPTY_FORM);
+    setEditIndex(null);
+  };
+
+  const deleteCommand = (idx: number) => {
+    const updated = commands.filter((_, i) => i !== idx);
+    setCommands(updated);
+    saveCommands(updated);
+    setDeleteConfirm(null);
+  };
+
+  useEffect(() => { return () => recognitionRef.current?.stop(); }, []);
 
   useEffect(() => {
     if (lastMatchedId !== null) {
@@ -137,8 +185,112 @@ export default function Index() {
     }
   }, [lastMatchedId]);
 
+  const isFormValid = form.label.trim() && form.phrase.trim() && form.url.trim();
+
   return (
     <div className="min-h-screen bg-[#F7F7F5] text-[#1A1A1A] font-['Golos_Text',sans-serif]">
+
+      {/* Modal: Add / Edit */}
+      {showForm && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center">
+          <div className="absolute inset-0 bg-black/20 backdrop-blur-sm" onClick={() => setShowForm(false)} />
+          <div className="relative w-full max-w-lg bg-white rounded-t-2xl sm:rounded-2xl shadow-xl border border-[#E8E8E4] p-6 z-10">
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-base font-semibold text-[#1A1A1A]">
+                {editIndex !== null ? "Редактировать команду" : "Новая команда"}
+              </h2>
+              <button onClick={() => setShowForm(false)} className="w-7 h-7 rounded-full bg-[#F7F7F5] flex items-center justify-center hover:bg-[#E8E8E4] transition-colors cursor-pointer">
+                <Icon name="X" size={13} className="text-[#8C8C88]" />
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              {/* Label */}
+              <div>
+                <label className="text-xs font-medium text-[#8C8C88] uppercase tracking-wider mb-1.5 block">Название</label>
+                <input
+                  value={form.label}
+                  onChange={(e) => setForm((f) => ({ ...f, label: e.target.value }))}
+                  placeholder="Например: Открой гараж"
+                  className="w-full px-4 py-3 rounded-xl border border-[#E8E8E4] bg-[#F7F7F5] text-sm text-[#1A1A1A] placeholder:text-[#C8C8C4] focus:outline-none focus:border-[#4F46E5] transition-colors"
+                />
+              </div>
+
+              {/* Phrase */}
+              <div>
+                <label className="text-xs font-medium text-[#8C8C88] uppercase tracking-wider mb-1.5 block">Голосовая фраза</label>
+                <input
+                  value={form.phrase}
+                  onChange={(e) => setForm((f) => ({ ...f, phrase: e.target.value }))}
+                  placeholder="Например: открой гараж"
+                  className="w-full px-4 py-3 rounded-xl border border-[#E8E8E4] bg-[#F7F7F5] text-sm font-['IBM_Plex_Mono',monospace] text-[#1A1A1A] placeholder:text-[#C8C8C4] focus:outline-none focus:border-[#4F46E5] transition-colors"
+                />
+                <p className="text-xs text-[#C8C8C4] mt-1.5">Произносите эту фразу для активации</p>
+              </div>
+
+              {/* URL */}
+              <div>
+                <label className="text-xs font-medium text-[#8C8C88] uppercase tracking-wider mb-1.5 block">Ссылка или deep link</label>
+                <input
+                  value={form.url}
+                  onChange={(e) => setForm((f) => ({ ...f, url: e.target.value }))}
+                  placeholder="https://... или приложение://"
+                  className="w-full px-4 py-3 rounded-xl border border-[#E8E8E4] bg-[#F7F7F5] text-sm font-['IBM_Plex_Mono',monospace] text-[#1A1A1A] placeholder:text-[#C8C8C4] focus:outline-none focus:border-[#4F46E5] transition-colors"
+                />
+              </div>
+
+              {/* Description */}
+              <div>
+                <label className="text-xs font-medium text-[#8C8C88] uppercase tracking-wider mb-1.5 block">Описание (необязательно)</label>
+                <input
+                  value={form.description}
+                  onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
+                  placeholder="Что делает команда"
+                  className="w-full px-4 py-3 rounded-xl border border-[#E8E8E4] bg-[#F7F7F5] text-sm text-[#1A1A1A] placeholder:text-[#C8C8C4] focus:outline-none focus:border-[#4F46E5] transition-colors"
+                />
+              </div>
+
+              {/* Icon picker */}
+              <div>
+                <label className="text-xs font-medium text-[#8C8C88] uppercase tracking-wider mb-2 block">Иконка</label>
+                <div className="flex flex-wrap gap-2">
+                  {ICON_OPTIONS.map((name) => (
+                    <button
+                      key={name}
+                      type="button"
+                      onClick={() => setForm((f) => ({ ...f, icon: name }))}
+                      className={`w-9 h-9 rounded-lg flex items-center justify-center transition-all cursor-pointer border ${
+                        form.icon === name
+                          ? "bg-[#4F46E5] border-[#4F46E5]"
+                          : "bg-[#F7F7F5] border-[#E8E8E4] hover:border-[#4F46E5]"
+                      }`}
+                    >
+                      <Icon name={name} size={16} className={form.icon === name ? "text-white" : "text-[#8C8C88]"} fallback="Zap" />
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={() => setShowForm(false)}
+                className="flex-1 py-3 rounded-xl border border-[#E8E8E4] text-sm font-medium text-[#8C8C88] hover:bg-[#F7F7F5] transition-colors cursor-pointer"
+              >
+                Отмена
+              </button>
+              <button
+                onClick={saveForm}
+                disabled={!isFormValid}
+                className="flex-1 py-3 rounded-xl bg-[#4F46E5] text-sm font-medium text-white hover:bg-[#4338CA] transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {editIndex !== null ? "Сохранить" : "Добавить"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <header className="border-b border-[#E8E8E4] px-6 py-5 flex items-center justify-between max-w-2xl mx-auto w-full">
         <div className="flex items-center gap-3">
@@ -180,9 +332,7 @@ export default function Index() {
           />
         </button>
         <p className="text-xs font-['IBM_Plex_Mono',monospace] text-[#8C8C88] tracking-wider h-4 text-center">
-          {listening
-            ? transcript ? `"${transcript}"` : "Говорите команду..."
-            : "Нажмите для активации"}
+          {listening ? (transcript ? `"${transcript}"` : "Говорите команду...") : "Нажмите для активации"}
         </p>
       </div>
 
@@ -194,10 +344,7 @@ export default function Index() {
               key={tab}
               onClick={() => setActiveTab(tab)}
               className={`px-5 py-3 text-sm font-medium border-b-2 -mb-px transition-all duration-200 cursor-pointer
-                ${activeTab === tab
-                  ? "border-[#4F46E5] text-[#4F46E5]"
-                  : "border-transparent text-[#8C8C88] hover:text-[#1A1A1A]"
-                }`}
+                ${activeTab === tab ? "border-[#4F46E5] text-[#4F46E5]" : "border-transparent text-[#8C8C88] hover:text-[#1A1A1A]"}`}
             >
               {tab === "commands" ? "Команды" : (
                 <span className="flex items-center gap-2">
@@ -213,32 +360,72 @@ export default function Index() {
           ))}
         </div>
 
-        {/* Commands */}
+        {/* Commands Tab */}
         {activeTab === "commands" && (
           <div className="space-y-3 pb-12">
-            {COMMANDS.map((cmd) => (
-              <button
-                key={cmd.phrase}
-                onClick={() => runCommand(cmd)}
-                className="w-full flex items-center gap-4 px-5 py-4 rounded-xl border border-[#E8E8E4] bg-white hover:border-[#4F46E5] hover:shadow-[0_0_16px_rgba(79,70,229,0.08)] transition-all duration-200 cursor-pointer group text-left"
-              >
-                <div className="w-10 h-10 rounded-xl bg-[#EEEDFB] flex items-center justify-center flex-shrink-0 group-hover:bg-[#4F46E5] transition-colors duration-200">
-                  <Icon name={cmd.icon} size={18} className="text-[#4F46E5] group-hover:text-white transition-colors duration-200" fallback="Zap" />
+            {commands.map((cmd, idx) => (
+              <div key={idx} className="relative group/card">
+                {/* Delete confirm overlay */}
+                {deleteConfirm === idx && (
+                  <div className="absolute inset-0 z-10 rounded-xl bg-[#FEF2F2] border border-[#FCA5A5] flex items-center justify-between px-5">
+                    <p className="text-sm text-[#EF4444] font-medium">Удалить команду?</p>
+                    <div className="flex gap-2">
+                      <button onClick={() => setDeleteConfirm(null)} className="px-3 py-1.5 text-xs rounded-lg border border-[#E8E8E4] bg-white text-[#8C8C88] hover:bg-[#F7F7F5] cursor-pointer transition-colors">Отмена</button>
+                      <button onClick={() => deleteCommand(idx)} className="px-3 py-1.5 text-xs rounded-lg bg-[#EF4444] text-white hover:bg-[#DC2626] cursor-pointer transition-colors">Удалить</button>
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => runCommand(cmd)}
+                    className="flex-1 flex items-center gap-4 px-5 py-4 rounded-xl border border-[#E8E8E4] bg-white hover:border-[#4F46E5] hover:shadow-[0_0_16px_rgba(79,70,229,0.08)] transition-all duration-200 cursor-pointer group text-left"
+                  >
+                    <div className="w-10 h-10 rounded-xl bg-[#EEEDFB] flex items-center justify-center flex-shrink-0 group-hover:bg-[#4F46E5] transition-colors duration-200">
+                      <Icon name={cmd.icon} size={18} className="text-[#4F46E5] group-hover:text-white transition-colors duration-200" fallback="Zap" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-semibold text-[#1A1A1A]">{cmd.label}</p>
+                      <p className="text-xs text-[#8C8C88] mt-0.5 font-['IBM_Plex_Mono',monospace]">«{cmd.phrase}»</p>
+                    </div>
+                    <Icon name="ArrowRight" size={15} className="text-[#C8C8C4] group-hover:text-[#4F46E5] transition-colors duration-200 flex-shrink-0" />
+                  </button>
+
+                  {/* Edit / Delete */}
+                  <div className="flex flex-col gap-1 opacity-0 group-hover/card:opacity-100 transition-opacity duration-150">
+                    <button
+                      onClick={() => openEditForm(idx)}
+                      className="w-8 h-8 rounded-lg border border-[#E8E8E4] bg-white flex items-center justify-center hover:border-[#4F46E5] hover:text-[#4F46E5] transition-colors cursor-pointer"
+                    >
+                      <Icon name="Pencil" size={13} className="text-[#8C8C88]" />
+                    </button>
+                    <button
+                      onClick={() => setDeleteConfirm(idx)}
+                      className="w-8 h-8 rounded-lg border border-[#E8E8E4] bg-white flex items-center justify-center hover:border-[#EF4444] hover:text-[#EF4444] transition-colors cursor-pointer"
+                    >
+                      <Icon name="Trash2" size={13} className="text-[#8C8C88]" />
+                    </button>
+                  </div>
                 </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-semibold text-[#1A1A1A]">{cmd.label}</p>
-                  <p className="text-xs text-[#8C8C88] mt-0.5 font-['IBM_Plex_Mono',monospace]">«{cmd.phrase}»</p>
-                </div>
-                <Icon name="ArrowRight" size={15} className="text-[#C8C8C4] group-hover:text-[#4F46E5] transition-colors duration-200 flex-shrink-0" />
-              </button>
+              </div>
             ))}
-            <p className="text-xs text-[#C8C8C4] text-center pt-2 font-['IBM_Plex_Mono',monospace]">
+
+            {/* Add button */}
+            <button
+              onClick={openAddForm}
+              className="w-full flex items-center justify-center gap-2 px-5 py-4 rounded-xl border border-dashed border-[#C8C8C4] bg-transparent hover:border-[#4F46E5] hover:bg-[#EEEDFB] transition-all duration-200 cursor-pointer group"
+            >
+              <Icon name="Plus" size={16} className="text-[#8C8C88] group-hover:text-[#4F46E5] transition-colors" />
+              <span className="text-sm text-[#8C8C88] group-hover:text-[#4F46E5] transition-colors font-medium">Добавить команду</span>
+            </button>
+
+            <p className="text-xs text-[#C8C8C4] text-center pt-1 font-['IBM_Plex_Mono',monospace]">
               Нажмите на карточку или скажите команду голосом
             </p>
           </div>
         )}
 
-        {/* History */}
+        {/* History Tab */}
         {activeTab === "history" && (
           <div className="pb-12">
             {history.length === 0 ? (
@@ -253,27 +440,17 @@ export default function Index() {
                   <div
                     key={item.id}
                     className={`flex items-start gap-4 px-5 py-4 rounded-xl border transition-all duration-500 ${
-                      lastMatchedId === item.id
-                        ? "border-[#4F46E5] bg-[#EEEDFB]"
-                        : "border-[#E8E8E4] bg-white"
+                      lastMatchedId === item.id ? "border-[#4F46E5] bg-[#EEEDFB]" : "border-[#E8E8E4] bg-white"
                     }`}
                   >
-                    <div className={`mt-0.5 w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 ${
-                      item.status === "success" ? "bg-[#ECFDF5]" : "bg-[#FEF2F2]"
-                    }`}>
-                      <Icon
-                        name={item.status === "success" ? "Check" : "X"}
-                        size={11}
-                        className={item.status === "success" ? "text-[#10B981]" : "text-[#EF4444]"}
-                      />
+                    <div className={`mt-0.5 w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 ${item.status === "success" ? "bg-[#ECFDF5]" : "bg-[#FEF2F2]"}`}>
+                      <Icon name={item.status === "success" ? "Check" : "X"} size={11} className={item.status === "success" ? "text-[#10B981]" : "text-[#EF4444]"} />
                     </div>
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-semibold text-[#1A1A1A]">{item.phrase}</p>
                       <p className="text-xs text-[#8C8C88] mt-1">{item.result}</p>
                     </div>
-                    <span className="text-xs font-['IBM_Plex_Mono',monospace] text-[#C8C8C4] flex-shrink-0 mt-0.5">
-                      {item.time}
-                    </span>
+                    <span className="text-xs font-['IBM_Plex_Mono',monospace] text-[#C8C8C4] flex-shrink-0 mt-0.5">{item.time}</span>
                   </div>
                 ))}
               </div>
