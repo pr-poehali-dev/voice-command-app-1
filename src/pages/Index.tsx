@@ -1,5 +1,6 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import Icon from "@/components/ui/icon";
+import { useVosk } from "@/hooks/useVosk";
 
 type Command = {
   phrase: string;
@@ -53,35 +54,19 @@ const formatTime = () => {
 };
 
 const STORAGE_KEY = "voice_commands";
-
 const loadCommands = (): Command[] => {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
     return saved ? JSON.parse(saved) : DEFAULT_COMMANDS;
-  } catch {
-    return DEFAULT_COMMANDS;
-  }
+  } catch { return DEFAULT_COMMANDS; }
 };
-
-const saveCommands = (cmds: Command[]) => {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(cmds));
-};
-
-declare global {
-  interface Window {
-    SpeechRecognition: typeof SpeechRecognition;
-    webkitSpeechRecognition: typeof SpeechRecognition;
-  }
-}
+const saveCommands = (cmds: Command[]) => localStorage.setItem(STORAGE_KEY, JSON.stringify(cmds));
 
 type Tab = "commands" | "history";
-
 const EMPTY_FORM = { label: "", phrase: "", description: "", icon: "Zap", url: "" };
 
 export default function Index() {
   const [activeTab, setActiveTab] = useState<Tab>("commands");
-  const [listening, setListening] = useState(false);
-  const [transcript, setTranscript] = useState("");
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [lastMatchedId, setLastMatchedId] = useState<number | null>(null);
   const [commands, setCommands] = useState<Command[]>(loadCommands);
@@ -89,57 +74,41 @@ export default function Index() {
   const [form, setForm] = useState(EMPTY_FORM);
   const [editIndex, setEditIndex] = useState<number | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<number | null>(null);
-  const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const [lastTranscript, setLastTranscript] = useState("");
   const idRef = useRef(1);
+  const commandsRef = useRef(commands);
+  commandsRef.current = commands;
 
-  const addHistory = (phrase: string, result: string, status: "success" | "error") => {
+  const addHistory = useCallback((phrase: string, result: string, status: "success" | "error") => {
     const item: HistoryItem = { id: idRef.current++, phrase, result, time: formatTime(), status };
     setHistory((prev) => [item, ...prev]);
     if (status === "success") setLastMatchedId(item.id);
-  };
+  }, []);
 
-  const handleTranscript = (text: string) => {
+  const handleVoskResult = useCallback((text: string) => {
     const lower = text.toLowerCase().trim();
-    setTranscript(lower);
-    const matched = commands.find((cmd) => lower.includes(cmd.phrase));
+    setLastTranscript(lower);
+    const matched = commandsRef.current.find((cmd) => lower.includes(cmd.phrase));
     if (matched) {
       addHistory(matched.label, `Выполняется: ${matched.description}`, "success");
       setTimeout(() => { window.location.href = matched.url; }, 600);
     } else {
       addHistory(text, "Команда не распознана", "error");
     }
-  };
+    setTimeout(() => setLastTranscript(""), 2500);
+  }, [addHistory]);
 
-  const startListening = () => {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) { addHistory("—", "Браузер не поддерживает распознавание голоса", "error"); return; }
-    const recognition = new SR();
-    recognition.lang = "ru-RU";
-    recognition.interimResults = false;
-    recognition.maxAlternatives = 1;
-    recognition.onresult = (e) => handleTranscript(e.results[0][0].transcript);
-    recognition.onerror = (e) => { addHistory("—", `Ошибка: ${e.error}`, "error"); setListening(false); };
-    recognition.onend = () => { setListening(false); setTranscript(""); };
-    recognitionRef.current = recognition;
-    recognition.start();
-    setListening(true);
-    setTranscript("");
-  };
+  const { status, loadProgress, errorMsg, toggle } = useVosk(handleVoskResult);
 
-  const stopListening = () => { recognitionRef.current?.stop(); setListening(false); setTranscript(""); };
-  const handleMicClick = () => listening ? stopListening() : startListening();
+  const listening = status === "listening";
+  const loading = status === "loading";
 
   const runCommand = (cmd: Command) => {
     addHistory(cmd.label, `Выполняется: ${cmd.description}`, "success");
     setTimeout(() => { window.location.href = cmd.url; }, 400);
   };
 
-  const openAddForm = () => {
-    setForm(EMPTY_FORM);
-    setEditIndex(null);
-    setShowForm(true);
-  };
-
+  const openAddForm = () => { setForm(EMPTY_FORM); setEditIndex(null); setShowForm(true); };
   const openEditForm = (idx: number) => {
     const cmd = commands[idx];
     setForm({ label: cmd.label, phrase: cmd.phrase, description: cmd.description, icon: cmd.icon, url: cmd.url });
@@ -156,12 +125,9 @@ export default function Index() {
       icon: form.icon,
       url: form.url.trim(),
     };
-    let updated: Command[];
-    if (editIndex !== null) {
-      updated = commands.map((c, i) => (i === editIndex ? newCmd : c));
-    } else {
-      updated = [...commands, newCmd];
-    }
+    const updated = editIndex !== null
+      ? commands.map((c, i) => (i === editIndex ? newCmd : c))
+      : [...commands, newCmd];
     setCommands(updated);
     saveCommands(updated);
     setShowForm(false);
@@ -176,8 +142,6 @@ export default function Index() {
     setDeleteConfirm(null);
   };
 
-  useEffect(() => { return () => recognitionRef.current?.stop(); }, []);
-
   useEffect(() => {
     if (lastMatchedId !== null) {
       const t = setTimeout(() => setLastMatchedId(null), 2000);
@@ -186,6 +150,20 @@ export default function Index() {
   }, [lastMatchedId]);
 
   const isFormValid = form.label.trim() && form.phrase.trim() && form.url.trim();
+
+  const statusLabel = loading
+    ? `Загрузка модели ${loadProgress}%`
+    : listening ? "Слушаю..."
+    : status === "ready" ? "Готов"
+    : status === "error" ? "Ошибка"
+    : "Офлайн";
+
+  const statusDot = loading
+    ? "bg-amber-400 animate-pulse"
+    : listening ? "bg-[#4F46E5] animate-pulse"
+    : status === "ready" ? "bg-emerald-400"
+    : status === "error" ? "bg-red-400"
+    : "bg-[#C8C8C4]";
 
   return (
     <div className="min-h-screen bg-[#F7F7F5] text-[#1A1A1A] font-['Golos_Text',sans-serif]">
@@ -203,87 +181,39 @@ export default function Index() {
                 <Icon name="X" size={13} className="text-[#8C8C88]" />
               </button>
             </div>
-
             <div className="space-y-4">
-              {/* Label */}
               <div>
                 <label className="text-xs font-medium text-[#8C8C88] uppercase tracking-wider mb-1.5 block">Название</label>
-                <input
-                  value={form.label}
-                  onChange={(e) => setForm((f) => ({ ...f, label: e.target.value }))}
-                  placeholder="Например: Открой гараж"
-                  className="w-full px-4 py-3 rounded-xl border border-[#E8E8E4] bg-[#F7F7F5] text-sm text-[#1A1A1A] placeholder:text-[#C8C8C4] focus:outline-none focus:border-[#4F46E5] transition-colors"
-                />
+                <input value={form.label} onChange={(e) => setForm((f) => ({ ...f, label: e.target.value }))} placeholder="Например: Открой гараж" className="w-full px-4 py-3 rounded-xl border border-[#E8E8E4] bg-[#F7F7F5] text-sm text-[#1A1A1A] placeholder:text-[#C8C8C4] focus:outline-none focus:border-[#4F46E5] transition-colors" />
               </div>
-
-              {/* Phrase */}
               <div>
                 <label className="text-xs font-medium text-[#8C8C88] uppercase tracking-wider mb-1.5 block">Голосовая фраза</label>
-                <input
-                  value={form.phrase}
-                  onChange={(e) => setForm((f) => ({ ...f, phrase: e.target.value }))}
-                  placeholder="Например: открой гараж"
-                  className="w-full px-4 py-3 rounded-xl border border-[#E8E8E4] bg-[#F7F7F5] text-sm font-['IBM_Plex_Mono',monospace] text-[#1A1A1A] placeholder:text-[#C8C8C4] focus:outline-none focus:border-[#4F46E5] transition-colors"
-                />
+                <input value={form.phrase} onChange={(e) => setForm((f) => ({ ...f, phrase: e.target.value }))} placeholder="Например: открой гараж" className="w-full px-4 py-3 rounded-xl border border-[#E8E8E4] bg-[#F7F7F5] text-sm font-['IBM_Plex_Mono',monospace] text-[#1A1A1A] placeholder:text-[#C8C8C4] focus:outline-none focus:border-[#4F46E5] transition-colors" />
                 <p className="text-xs text-[#C8C8C4] mt-1.5">Произносите эту фразу для активации</p>
               </div>
-
-              {/* URL */}
               <div>
                 <label className="text-xs font-medium text-[#8C8C88] uppercase tracking-wider mb-1.5 block">Ссылка или deep link</label>
-                <input
-                  value={form.url}
-                  onChange={(e) => setForm((f) => ({ ...f, url: e.target.value }))}
-                  placeholder="https://... или приложение://"
-                  className="w-full px-4 py-3 rounded-xl border border-[#E8E8E4] bg-[#F7F7F5] text-sm font-['IBM_Plex_Mono',monospace] text-[#1A1A1A] placeholder:text-[#C8C8C4] focus:outline-none focus:border-[#4F46E5] transition-colors"
-                />
+                <input value={form.url} onChange={(e) => setForm((f) => ({ ...f, url: e.target.value }))} placeholder="https://... или приложение://" className="w-full px-4 py-3 rounded-xl border border-[#E8E8E4] bg-[#F7F7F5] text-sm font-['IBM_Plex_Mono',monospace] text-[#1A1A1A] placeholder:text-[#C8C8C4] focus:outline-none focus:border-[#4F46E5] transition-colors" />
               </div>
-
-              {/* Description */}
               <div>
                 <label className="text-xs font-medium text-[#8C8C88] uppercase tracking-wider mb-1.5 block">Описание (необязательно)</label>
-                <input
-                  value={form.description}
-                  onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
-                  placeholder="Что делает команда"
-                  className="w-full px-4 py-3 rounded-xl border border-[#E8E8E4] bg-[#F7F7F5] text-sm text-[#1A1A1A] placeholder:text-[#C8C8C4] focus:outline-none focus:border-[#4F46E5] transition-colors"
-                />
+                <input value={form.description} onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))} placeholder="Что делает команда" className="w-full px-4 py-3 rounded-xl border border-[#E8E8E4] bg-[#F7F7F5] text-sm text-[#1A1A1A] placeholder:text-[#C8C8C4] focus:outline-none focus:border-[#4F46E5] transition-colors" />
               </div>
-
-              {/* Icon picker */}
               <div>
                 <label className="text-xs font-medium text-[#8C8C88] uppercase tracking-wider mb-2 block">Иконка</label>
                 <div className="flex flex-wrap gap-2">
                   {ICON_OPTIONS.map((name) => (
-                    <button
-                      key={name}
-                      type="button"
-                      onClick={() => setForm((f) => ({ ...f, icon: name }))}
-                      className={`w-9 h-9 rounded-lg flex items-center justify-center transition-all cursor-pointer border ${
-                        form.icon === name
-                          ? "bg-[#4F46E5] border-[#4F46E5]"
-                          : "bg-[#F7F7F5] border-[#E8E8E4] hover:border-[#4F46E5]"
-                      }`}
-                    >
+                    <button key={name} type="button" onClick={() => setForm((f) => ({ ...f, icon: name }))}
+                      className={`w-9 h-9 rounded-lg flex items-center justify-center transition-all cursor-pointer border ${form.icon === name ? "bg-[#4F46E5] border-[#4F46E5]" : "bg-[#F7F7F5] border-[#E8E8E4] hover:border-[#4F46E5]"}`}>
                       <Icon name={name} size={16} className={form.icon === name ? "text-white" : "text-[#8C8C88]"} fallback="Zap" />
                     </button>
                   ))}
                 </div>
               </div>
             </div>
-
             <div className="flex gap-3 mt-6">
-              <button
-                onClick={() => setShowForm(false)}
-                className="flex-1 py-3 rounded-xl border border-[#E8E8E4] text-sm font-medium text-[#8C8C88] hover:bg-[#F7F7F5] transition-colors cursor-pointer"
-              >
-                Отмена
-              </button>
-              <button
-                onClick={saveForm}
-                disabled={!isFormValid}
-                className="flex-1 py-3 rounded-xl bg-[#4F46E5] text-sm font-medium text-white hover:bg-[#4338CA] transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-              >
+              <button onClick={() => setShowForm(false)} className="flex-1 py-3 rounded-xl border border-[#E8E8E4] text-sm font-medium text-[#8C8C88] hover:bg-[#F7F7F5] transition-colors cursor-pointer">Отмена</button>
+              <button onClick={saveForm} disabled={!isFormValid} className="flex-1 py-3 rounded-xl bg-[#4F46E5] text-sm font-medium text-white hover:bg-[#4338CA] transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">
                 {editIndex !== null ? "Сохранить" : "Добавить"}
               </button>
             </div>
@@ -302,20 +232,29 @@ export default function Index() {
           </span>
         </div>
         <div className="flex items-center gap-2">
-          <span className={`w-1.5 h-1.5 rounded-full transition-colors duration-300 ${listening ? "bg-[#4F46E5] animate-pulse" : "bg-[#C8C8C4]"}`} />
-          <span className="text-xs font-['IBM_Plex_Mono',monospace] text-[#8C8C88]">
-            {listening ? "Слушаю..." : "Ожидание"}
-          </span>
+          <span className={`w-1.5 h-1.5 rounded-full transition-colors duration-300 ${statusDot}`} />
+          <span className="text-xs font-['IBM_Plex_Mono',monospace] text-[#8C8C88]">{statusLabel}</span>
         </div>
       </header>
 
       {/* Mic Section */}
       <div className="flex flex-col items-center pt-12 pb-10 gap-4">
+
+        {/* Loading bar */}
+        {loading && (
+          <div className="w-40 h-1 bg-[#E8E8E4] rounded-full overflow-hidden">
+            <div className="h-full bg-[#4F46E5] rounded-full transition-all duration-300" style={{ width: `${loadProgress}%` }} />
+          </div>
+        )}
+
         <button
-          onClick={handleMicClick}
-          className={`relative w-20 h-20 rounded-full border-2 flex items-center justify-center transition-all duration-300 group cursor-pointer
+          onClick={toggle}
+          disabled={loading}
+          className={`relative w-20 h-20 rounded-full border-2 flex items-center justify-center transition-all duration-300 group cursor-pointer disabled:cursor-wait
             ${listening
               ? "border-[#4F46E5] bg-[#4F46E5] shadow-[0_0_48px_rgba(79,70,229,0.35)]"
+              : loading ? "border-amber-300 bg-amber-50"
+              : status === "error" ? "border-red-300 bg-red-50"
               : "border-[#E8E8E4] bg-white hover:border-[#4F46E5] hover:shadow-[0_0_24px_rgba(79,70,229,0.12)]"
             }`}
         >
@@ -326,26 +265,43 @@ export default function Index() {
             </>
           )}
           <Icon
-            name={listening ? "MicOff" : "Mic"}
+            name={loading ? "Loader" : listening ? "MicOff" : status === "error" ? "MicOff" : "Mic"}
             size={26}
-            className={`transition-colors duration-300 ${listening ? "text-white" : "text-[#1A1A1A] group-hover:text-[#4F46E5]"}`}
+            className={`transition-colors duration-300 ${
+              listening ? "text-white"
+              : loading ? "text-amber-400 animate-spin"
+              : status === "error" ? "text-red-400"
+              : "text-[#1A1A1A] group-hover:text-[#4F46E5]"
+            }`}
           />
         </button>
-        <p className="text-xs font-['IBM_Plex_Mono',monospace] text-[#8C8C88] tracking-wider h-4 text-center">
-          {listening ? (transcript ? `"${transcript}"` : "Говорите команду...") : "Нажмите для активации"}
-        </p>
+
+        <div className="text-center flex flex-col items-center gap-1">
+          <p className="text-xs font-['IBM_Plex_Mono',monospace] text-[#8C8C88] tracking-wider">
+            {loading
+              ? `Загрузка офлайн-модели... ${loadProgress}%`
+              : listening
+              ? lastTranscript ? `"${lastTranscript}"` : "Говорите команду..."
+              : status === "idle"
+              ? "Нажмите — загрузится офлайн-модель (~50 МБ)"
+              : status === "error" ? errorMsg
+              : "Нажмите для активации"}
+          </p>
+          {status === "idle" && (
+            <p className="text-[10px] text-[#C8C8C4] font-['IBM_Plex_Mono',monospace]">
+              Загружается один раз, затем работает без интернета
+            </p>
+          )}
+        </div>
       </div>
 
       {/* Tabs + Content */}
       <div className="px-6 max-w-2xl mx-auto">
         <div className="flex border-b border-[#E8E8E4] mb-6">
           {(["commands", "history"] as Tab[]).map((tab) => (
-            <button
-              key={tab}
-              onClick={() => setActiveTab(tab)}
+            <button key={tab} onClick={() => setActiveTab(tab)}
               className={`px-5 py-3 text-sm font-medium border-b-2 -mb-px transition-all duration-200 cursor-pointer
-                ${activeTab === tab ? "border-[#4F46E5] text-[#4F46E5]" : "border-transparent text-[#8C8C88] hover:text-[#1A1A1A]"}`}
-            >
+                ${activeTab === tab ? "border-[#4F46E5] text-[#4F46E5]" : "border-transparent text-[#8C8C88] hover:text-[#1A1A1A]"}`}>
               {tab === "commands" ? "Команды" : (
                 <span className="flex items-center gap-2">
                   История
@@ -360,12 +316,11 @@ export default function Index() {
           ))}
         </div>
 
-        {/* Commands Tab */}
+        {/* Commands */}
         {activeTab === "commands" && (
           <div className="space-y-3 pb-12">
             {commands.map((cmd, idx) => (
               <div key={idx} className="relative group/card">
-                {/* Delete confirm overlay */}
                 {deleteConfirm === idx && (
                   <div className="absolute inset-0 z-10 rounded-xl bg-[#FEF2F2] border border-[#FCA5A5] flex items-center justify-between px-5">
                     <p className="text-sm text-[#EF4444] font-medium">Удалить команду?</p>
@@ -375,12 +330,9 @@ export default function Index() {
                     </div>
                   </div>
                 )}
-
                 <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => runCommand(cmd)}
-                    className="flex-1 flex items-center gap-4 px-5 py-4 rounded-xl border border-[#E8E8E4] bg-white hover:border-[#4F46E5] hover:shadow-[0_0_16px_rgba(79,70,229,0.08)] transition-all duration-200 cursor-pointer group text-left"
-                  >
+                  <button onClick={() => runCommand(cmd)}
+                    className="flex-1 flex items-center gap-4 px-5 py-4 rounded-xl border border-[#E8E8E4] bg-white hover:border-[#4F46E5] hover:shadow-[0_0_16px_rgba(79,70,229,0.08)] transition-all duration-200 cursor-pointer group text-left">
                     <div className="w-10 h-10 rounded-xl bg-[#EEEDFB] flex items-center justify-center flex-shrink-0 group-hover:bg-[#4F46E5] transition-colors duration-200">
                       <Icon name={cmd.icon} size={18} className="text-[#4F46E5] group-hover:text-white transition-colors duration-200" fallback="Zap" />
                     </div>
@@ -390,42 +342,29 @@ export default function Index() {
                     </div>
                     <Icon name="ArrowRight" size={15} className="text-[#C8C8C4] group-hover:text-[#4F46E5] transition-colors duration-200 flex-shrink-0" />
                   </button>
-
-                  {/* Edit / Delete */}
                   <div className="flex flex-col gap-1 opacity-0 group-hover/card:opacity-100 transition-opacity duration-150">
-                    <button
-                      onClick={() => openEditForm(idx)}
-                      className="w-8 h-8 rounded-lg border border-[#E8E8E4] bg-white flex items-center justify-center hover:border-[#4F46E5] hover:text-[#4F46E5] transition-colors cursor-pointer"
-                    >
+                    <button onClick={() => openEditForm(idx)} className="w-8 h-8 rounded-lg border border-[#E8E8E4] bg-white flex items-center justify-center hover:border-[#4F46E5] transition-colors cursor-pointer">
                       <Icon name="Pencil" size={13} className="text-[#8C8C88]" />
                     </button>
-                    <button
-                      onClick={() => setDeleteConfirm(idx)}
-                      className="w-8 h-8 rounded-lg border border-[#E8E8E4] bg-white flex items-center justify-center hover:border-[#EF4444] hover:text-[#EF4444] transition-colors cursor-pointer"
-                    >
+                    <button onClick={() => setDeleteConfirm(idx)} className="w-8 h-8 rounded-lg border border-[#E8E8E4] bg-white flex items-center justify-center hover:border-[#EF4444] transition-colors cursor-pointer">
                       <Icon name="Trash2" size={13} className="text-[#8C8C88]" />
                     </button>
                   </div>
                 </div>
               </div>
             ))}
-
-            {/* Add button */}
-            <button
-              onClick={openAddForm}
-              className="w-full flex items-center justify-center gap-2 px-5 py-4 rounded-xl border border-dashed border-[#C8C8C4] bg-transparent hover:border-[#4F46E5] hover:bg-[#EEEDFB] transition-all duration-200 cursor-pointer group"
-            >
+            <button onClick={openAddForm}
+              className="w-full flex items-center justify-center gap-2 px-5 py-4 rounded-xl border border-dashed border-[#C8C8C4] bg-transparent hover:border-[#4F46E5] hover:bg-[#EEEDFB] transition-all duration-200 cursor-pointer group">
               <Icon name="Plus" size={16} className="text-[#8C8C88] group-hover:text-[#4F46E5] transition-colors" />
               <span className="text-sm text-[#8C8C88] group-hover:text-[#4F46E5] transition-colors font-medium">Добавить команду</span>
             </button>
-
             <p className="text-xs text-[#C8C8C4] text-center pt-1 font-['IBM_Plex_Mono',monospace]">
               Нажмите на карточку или скажите команду голосом
             </p>
           </div>
         )}
 
-        {/* History Tab */}
+        {/* History */}
         {activeTab === "history" && (
           <div className="pb-12">
             {history.length === 0 ? (
@@ -437,12 +376,8 @@ export default function Index() {
             ) : (
               <div className="space-y-2">
                 {history.map((item) => (
-                  <div
-                    key={item.id}
-                    className={`flex items-start gap-4 px-5 py-4 rounded-xl border transition-all duration-500 ${
-                      lastMatchedId === item.id ? "border-[#4F46E5] bg-[#EEEDFB]" : "border-[#E8E8E4] bg-white"
-                    }`}
-                  >
+                  <div key={item.id}
+                    className={`flex items-start gap-4 px-5 py-4 rounded-xl border transition-all duration-500 ${lastMatchedId === item.id ? "border-[#4F46E5] bg-[#EEEDFB]" : "border-[#E8E8E4] bg-white"}`}>
                     <div className={`mt-0.5 w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 ${item.status === "success" ? "bg-[#ECFDF5]" : "bg-[#FEF2F2]"}`}>
                       <Icon name={item.status === "success" ? "Check" : "X"} size={11} className={item.status === "success" ? "text-[#10B981]" : "text-[#EF4444]"} />
                     </div>
